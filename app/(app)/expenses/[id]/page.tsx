@@ -5,6 +5,7 @@ import { hasPermission } from '@/lib/permissions';
 import { getExpense, listExpenseCategories } from '@/services/expenses';
 import { PageHeader } from '@/components/shared/page-header';
 import { ExpenseForm } from '@/components/expenses/expense-form';
+import { SourceEntries } from '@/components/accounting/source-entries';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { formatDate, formatDateTime, formatRs, isUuid, paymentMethodLabel } from '@/utils/format';
@@ -94,6 +95,10 @@ export default async function ExpenseDetailPage({
           </CardContent>
         </Card>
       )}
+
+      <div className="mt-6">
+        <SourceEntries sourceId={expense.id} role={ctx.profile.role} />
+      </div>
     </div>
   );
 }

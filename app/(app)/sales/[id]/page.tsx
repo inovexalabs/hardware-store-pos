@@ -6,6 +6,7 @@ import { getSale } from '@/services/sales';
 import { PageHeader } from '@/components/shared/page-header';
 import { PaymentBadge, TxStatusBadge } from '@/components/shared/status-badge';
 import { SaleActions } from '@/components/sales/sale-actions';
+import { SourceEntries } from '@/components/accounting/source-entries';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -267,6 +268,8 @@ export default async function SaleDetailPage({
               </CardContent>
             </Card>
           )}
+
+          <SourceEntries sourceId={sale.id} role={ctx.profile.role} />
         </div>
       </div>
     </div>

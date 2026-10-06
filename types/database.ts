@@ -281,6 +281,8 @@ export interface SupplierPayment {
 export interface ExpenseCategory {
   id: string;
   name: string;
+  /** expense account in the books (set by the database) */
+  account_id: string | null;
   is_active: boolean;
   created_at: string;
 }
@@ -609,4 +611,151 @@ export interface StatementRow {
   debit: number;
   credit: number;
   balance: number;
+}
+
+// -------------------------------------------------------------
+//  Accounting (migration 00011_accounting.sql)
+// -------------------------------------------------------------
+export type AccountType = 'asset' | 'liability' | 'equity' | 'income' | 'expense';
+
+export type JournalSourceType =
+  | 'manual'
+  | 'reversal'
+  | 'opening'
+  | 'stock_revaluation'
+  | 'sale'
+  | 'sale_cancel'
+  | 'purchase'
+  | 'purchase_cancel'
+  | 'sales_return'
+  | 'purchase_return'
+  | 'customer_payment'
+  | 'supplier_payment'
+  | 'expense'
+  | 'stock_adjustment';
+
+export interface Account {
+  id: string;
+  code: string;
+  name: string;
+  type: AccountType;
+  description: string | null;
+  /** set on built-in accounts the app posts to by itself */
+  system_key: string | null;
+  /** false = only the app may post here (receivables, payables, stock) */
+  allow_manual: boolean;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** report_account_balances() */
+export interface AccountBalanceRow {
+  account_id: string;
+  code: string;
+  name: string;
+  type: AccountType;
+  description: string | null;
+  system_key: string | null;
+  allow_manual: boolean;
+  is_active: boolean;
+  debit: number;
+  credit: number;
+  /** on the account's normal side (assets/expenses: Dr − Cr, others: Cr − Dr) */
+  balance: number;
+}
+
+export interface JournalEntry {
+  id: string;
+  entry_number: string;
+  entry_date: string;
+  narration: string;
+  reference: string | null;
+  source_type: JournalSourceType;
+  source_id: string | null;
+  /** sum of the debits */
+  total: number;
+  created_by: string | null;
+  created_at: string;
+}
+
+export interface JournalLine {
+  id: string;
+  entry_id: string;
+  line_no: number;
+  account_id: string;
+  debit: number;
+  credit: number;
+  memo: string | null;
+  customer_id: string | null;
+  supplier_id: string | null;
+}
+
+export interface JournalLineWithDetails extends JournalLine {
+  account: Pick<Account, 'id' | 'code' | 'name' | 'type'>;
+  customer: { id: string; name: string } | null;
+  supplier: { id: string; name: string; company: string | null } | null;
+}
+
+export interface JournalEntryWithLines extends JournalEntry {
+  lines: JournalLineWithDetails[];
+  profile: Pick<Profile, 'id' | 'full_name'> | null;
+}
+
+export interface TrialBalanceRow {
+  account_id: string;
+  code: string;
+  name: string;
+  type: AccountType;
+  period_debit: number;
+  period_credit: number;
+  closing_debit: number;
+  closing_credit: number;
+}
+
+/** report_income_statement() and report_balance_sheet() */
+export interface AccountAmountRow {
+  /** null for the computed "profit to date" line */
+  account_id: string | null;
+  code: string;
+  name: string;
+  type: AccountType;
+  amount: number;
+}
+
+export interface LedgerRow {
+  /** null on the opening-balance row */
+  entry_id: string | null;
+  entry_number: string | null;
+  entry_date: string;
+  narration: string;
+  memo: string | null;
+  party: string | null;
+  source_type: JournalSourceType | null;
+  debit: number;
+  credit: number;
+  /** running Dr − Cr: positive = debit balance */
+  balance: number;
+}
+
+export interface BooksCheck {
+  key: 'stock' | 'receivable' | 'payable';
+  label: string;
+  /** what the stock / customer / supplier screens add up to */
+  app: number;
+  /** balance of the matching account in the books */
+  books: number;
+}
+
+export interface AccountingOverview {
+  from: string;
+  to: string;
+  /** balance of each built-in account, keyed by system_key */
+  balances: Record<string, number>;
+  income: number;
+  expenses: number;
+  profit: number;
+  entries: number;
+  unbalanced_entries: number;
+  checks: BooksCheck[];
 }

@@ -17,6 +17,7 @@ import {
   Settings,
   Undo2,
   ScanBarcode,
+  BookOpenText,
   type LucideIcon,
 } from 'lucide-react';
 import type { UserRole } from '@/types/database';
@@ -41,6 +42,8 @@ export type Permission =
   | 'expenses.view'
   | 'expenses.write'
   | 'reports.view'
+  | 'accounting.view'
+  | 'accounting.write'
   | 'data.export'
   | 'settings.manage'
   | 'users.manage'
@@ -66,13 +69,15 @@ const OWNER_PERMISSIONS: Permission[] = [
   'expenses.view',
   'expenses.write',
   'reports.view',
+  'accounting.view',
+  'accounting.write',
   'data.export',
   'settings.manage',
   'users.manage',
   'audit.view',
 ];
 
-/** Runs the shop floor — no settings, users, expenses or audit. */
+/** Runs the shop floor — no settings, users, expenses, accounting books or audit. */
 const MANAGER_PERMISSIONS: Permission[] = [
   'dashboard.view',
   'sales.view',
@@ -153,6 +158,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/expenses', label: 'Expenses', icon: Wallet, permission: 'expenses.view' },
   { href: '/returns', label: 'Returns', icon: Undo2, permission: 'returns.process' },
   { href: '/reports', label: 'Reports', icon: BarChart3, permission: 'reports.view' },
+  { href: '/accounting', label: 'Accounting', icon: BookOpenText, permission: 'accounting.view' },
   { href: '/settings', label: 'Settings', icon: Settings, permission: 'settings.manage' },
   // every role works at a counter, so everyone can test the scanner/printer
   { href: '/devices', label: 'Devices', icon: ScanBarcode, permission: 'dashboard.view' },
@@ -176,6 +182,8 @@ export const ROUTE_PERMISSIONS: Record<string, Permission> = {
   '/expenses': 'expenses.view',
   '/returns': 'returns.process',
   '/reports': 'reports.view',
+  '/accounting': 'accounting.view',
+  '/accounting/journal/new': 'accounting.write',
   '/settings': 'settings.manage',
   '/devices': 'dashboard.view',
 };

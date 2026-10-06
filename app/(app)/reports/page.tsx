@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { requirePermission } from '@/lib/auth/guards';
 import { getPurchasesTotals, getSalesTotals } from '@/services/reports';
-import { REPORT_GROUPS, REPORTS, type ReportGroup } from '@/services/report-registry';
+import { canOpenReport, REPORT_GROUPS, REPORTS, type ReportGroup } from '@/services/report-registry';
 import { PageHeader } from '@/components/shared/page-header';
 import { StatCard } from '@/components/dashboard/stat-card';
 import { ReportDateRange } from '@/components/reports/report-date-range';
@@ -25,10 +25,15 @@ export default async function ReportsPage({
 }: {
   searchParams: Promise<{ tab?: string; from?: string; to?: string }>;
 }) {
-  await requirePermission('reports.view');
+  const ctx = await requirePermission('reports.view');
+  const role = ctx.profile.role;
   const params = await searchParams;
   const { from, to } = resolveDateRange(params);
-  const tab: ReportGroup = REPORT_GROUPS.some((g) => g.value === params.tab)
+  // only tabs with at least one report this person may open
+  const groups = REPORT_GROUPS.filter((group) =>
+    REPORTS.some((report) => report.group === group.value && canOpenReport(role, report))
+  );
+  const tab: ReportGroup = groups.some((g) => g.value === params.tab)
     ? (params.tab as ReportGroup)
     : 'sales';
 
@@ -38,7 +43,7 @@ export default async function ReportsPage({
   ]);
 
   const rangeQuery = `from=${from}&to=${to}`;
-  const reports = REPORTS.filter((report) => report.group === tab);
+  const reports = REPORTS.filter((report) => report.group === tab && canOpenReport(role, report));
 
   return (
     <div className="space-y-6">
@@ -94,7 +99,7 @@ export default async function ReportsPage({
 
       <div>
         <div className="mb-4 flex flex-wrap gap-1 rounded-lg border bg-card p-1" role="tablist">
-          {REPORT_GROUPS.map((group) => (
+          {groups.map((group) => (
             <Link
               key={group.value}
               href={`/reports?tab=${group.value}&${rangeQuery}`}
@@ -125,6 +130,9 @@ export default async function ReportsPage({
                     <p className="mt-1 text-sm text-muted-foreground">{report.description}</p>
                     {!report.usesRange && (
                       <p className="mt-2 text-xs font-medium text-primary">Shows right now</p>
+                    )}
+                    {report.asOf && (
+                      <p className="mt-2 text-xs font-medium text-primary">Shows balances on one date</p>
                     )}
                   </div>
                   <ChevronRight className="mt-1 h-5 w-5 shrink-0 text-muted-foreground" />

@@ -4,6 +4,7 @@ import { requirePermission } from '@/lib/auth/guards';
 import { hasPermission } from '@/lib/permissions';
 import { getPurchase } from '@/services/purchases';
 import { PageHeader } from '@/components/shared/page-header';
+import { SourceEntries } from '@/components/accounting/source-entries';
 import { PaymentBadge, TxStatusBadge } from '@/components/shared/status-badge';
 import { PaymentDialog } from '@/components/shared/payment-dialog';
 import { CancelPurchaseButton } from '@/components/purchases/purchase-actions';
@@ -323,6 +324,8 @@ export default async function PurchaseDetailPage({
               </CardContent>
             </Card>
           )}
+
+          <SourceEntries sourceId={purchase.id} role={role} />
         </div>
       </div>
     </div>

@@ -1,7 +1,7 @@
 import type { NextRequest } from 'next/server';
 import { getProfileOrNull } from '@/lib/auth/guards';
 import { hasPermission } from '@/lib/permissions';
-import { csvCell, getReportDefinition, resolveDays } from '@/services/report-registry';
+import { csvCell, getReportDefinition, reportPermission, resolveDays } from '@/services/report-registry';
 import { csvResponse, toCsv } from '@/utils/csv';
 import { resolveDateRange, todayInShopTimezone } from '@/utils/format';
 
@@ -10,12 +10,12 @@ export async function GET(request: NextRequest) {
   const ctx = await getProfileOrNull();
   if (!ctx) return new Response('Please sign in again.', { status: 401 });
   const role = ctx.profile.role;
-  if (!hasPermission(role, 'reports.view') || !hasPermission(role, 'data.export')) {
-    return new Response('You do not have permission to download reports.', { status: 403 });
-  }
-
   const params = request.nextUrl.searchParams;
   const report = getReportDefinition(params.get('kind') ?? '');
+  const needed = report ? reportPermission(report) : 'reports.view';
+  if (!hasPermission(role, needed) || !hasPermission(role, 'data.export')) {
+    return new Response('You do not have permission to download reports.', { status: 403 });
+  }
   if (!report) return new Response('Unknown report.', { status: 404 });
 
   const { from, to } = resolveDateRange({
@@ -33,6 +33,10 @@ export async function GET(request: NextRequest) {
     rows
   );
 
-  const suffix = report.usesRange ? `${from}_to_${to}` : todayInShopTimezone();
+  const suffix = report.asOf
+    ? `as_of_${to}`
+    : report.usesRange
+      ? `${from}_to_${to}`
+      : todayInShopTimezone();
   return csvResponse(`${report.kind}_${suffix}.csv`, csv);
 }

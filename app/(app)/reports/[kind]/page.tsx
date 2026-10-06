@@ -4,6 +4,7 @@ import { requirePermission } from '@/lib/auth/guards';
 import { hasPermission } from '@/lib/permissions';
 import {
   getReportDefinition,
+  reportPermission,
   resolveDays,
   SLOW_MOVING_DAYS,
 } from '@/services/report-registry';
@@ -13,7 +14,7 @@ import { ReportDateRange } from '@/components/reports/report-date-range';
 import { ReportExportBar } from '@/components/reports/report-export-bar';
 import { ReportTable } from '@/components/reports/report-table';
 import { Button } from '@/components/ui/button';
-import { formatDateRange, formatDateTime, resolveDateRange } from '@/utils/format';
+import { formatDate, formatDateRange, formatDateTime, resolveDateRange } from '@/utils/format';
 import { ArrowLeft, BarChart3 } from 'lucide-react';
 
 export default async function ReportPage({
@@ -24,8 +25,8 @@ export default async function ReportPage({
   searchParams: Promise<{ from?: string; to?: string; days?: string }>;
 }) {
   const { kind } = await params;
-  const ctx = await requirePermission('reports.view');
   const report = getReportDefinition(kind);
+  const ctx = await requirePermission(report ? reportPermission(report) : 'reports.view');
   if (!report) notFound();
 
   const query = await searchParams;
@@ -47,11 +48,13 @@ export default async function ReportPage({
           <>
             {report.description}{' '}
             <span className="font-medium text-foreground">
-              {report.usesRange
-                ? formatDateRange(from, to)
-                : report.usesDays
-                  ? `Not sold in the last ${days} days`
-                  : `As of ${formatDateTime(new Date())}`}
+              {report.asOf
+                ? `As of ${formatDate(to)}`
+                : report.usesRange
+                  ? formatDateRange(from, to)
+                  : report.usesDays
+                    ? `Not sold in the last ${days} days`
+                    : `As of ${formatDateTime(new Date())}`}
             </span>
           </>
         }
@@ -72,7 +75,9 @@ export default async function ReportPage({
         }
       />
 
-      {report.usesRange && <ReportDateRange key={`${from}_${to}`} from={from} to={to} />}
+      {report.usesRange && (
+        <ReportDateRange key={`${from}_${to}`} from={from} to={to} asOf={report.asOf} />
+      )}
 
       {report.usesDays && (
         <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border bg-card p-3">
@@ -88,7 +93,7 @@ export default async function ReportPage({
       {rows.length === 0 ? (
         <EmptyState icon={BarChart3} title={report.emptyMessage} description="Try a different date range." />
       ) : (
-        <ReportTable columns={report.columns} rows={rows} />
+        <ReportTable columns={report.columns} rows={rows} rowTone={report.rowTone} />
       )}
     </div>
   );

@@ -52,6 +52,25 @@ const FRIENDLY_PREFIXES = [
   'line discount is more',
   'duplicate key',
   'already paid',
+  // accounting
+  'write what this entry',
+  'choose the date of the entry',
+  'the entry date',
+  'an entry needs',
+  'each line needs',
+  'debits (',
+  'account not found',
+  'the account ',
+  'the books ',
+  'journal entry not found',
+  'this entry was already',
+  'enter an account code',
+  'enter the account name',
+  'choose the account type',
+  'another account',
+  'built-in accounts',
+  'this account ',
+  'stock value already',
 ];
 
 const KNOWN_PATTERNS: { test: RegExp; message: string }[] = [

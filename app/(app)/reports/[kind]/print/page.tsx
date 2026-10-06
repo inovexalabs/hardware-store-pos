@@ -1,13 +1,13 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { requirePermission } from '@/lib/auth/guards';
-import { getReportDefinition, resolveDays } from '@/services/report-registry';
+import { getReportDefinition, reportPermission, resolveDays } from '@/services/report-registry';
 import { getShopSettings } from '@/services/settings';
 import { PrintDocument } from '@/components/shared/print-document';
 import { PrintButton } from '@/components/shared/print-button';
 import { ReportTable } from '@/components/reports/report-table';
 import { Button } from '@/components/ui/button';
-import { formatDateRange, formatDateTime, resolveDateRange } from '@/utils/format';
+import { formatDate, formatDateRange, formatDateTime, resolveDateRange } from '@/utils/format';
 import { ArrowLeft } from 'lucide-react';
 
 export const metadata = { title: 'Print Report' };
@@ -20,8 +20,8 @@ export default async function ReportPrintPage({
   searchParams: Promise<{ from?: string; to?: string; days?: string }>;
 }) {
   const { kind } = await params;
-  await requirePermission('reports.view');
   const report = getReportDefinition(kind);
+  await requirePermission(report ? reportPermission(report) : 'reports.view');
   if (!report) notFound();
 
   const query = await searchParams;
@@ -48,11 +48,13 @@ export default async function ReportPrintPage({
         title={report.title.toUpperCase()}
         meta={
           <p>
-            {report.usesRange
-              ? formatDateRange(from, to)
-              : report.usesDays
-                ? `Not sold in ${days} days`
-                : `As of ${formatDateTime(new Date())}`}
+            {report.asOf
+              ? `As of ${formatDate(to)}`
+              : report.usesRange
+                ? formatDateRange(from, to)
+                : report.usesDays
+                  ? `Not sold in ${days} days`
+                  : `As of ${formatDateTime(new Date())}`}
           </p>
         }
       >
@@ -62,7 +64,7 @@ export default async function ReportPrintPage({
         {rows.length === 0 ? (
           <p>{report.emptyMessage}</p>
         ) : (
-          <ReportTable columns={report.columns} rows={rows} print />
+          <ReportTable columns={report.columns} rows={rows} rowTone={report.rowTone} print />
         )}
       </PrintDocument>
     </div>

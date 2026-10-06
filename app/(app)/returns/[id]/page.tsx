@@ -4,6 +4,7 @@ import { requirePermission } from '@/lib/auth/guards';
 import { hasPermission } from '@/lib/permissions';
 import { getReturn } from '@/services/returns';
 import { PageHeader } from '@/components/shared/page-header';
+import { SourceEntries } from '@/components/accounting/source-entries';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -162,6 +163,8 @@ export default async function ReturnDetailPage({
               </div>
             </CardContent>
           </Card>
+
+          <SourceEntries sourceId={detail.id} role={role} />
         </div>
       </div>
     </div>

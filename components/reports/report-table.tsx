@@ -14,6 +14,7 @@ import {
   displayTotal,
   type ReportColumn,
   type ReportRow,
+  type RowTone,
 } from '@/services/report-registry';
 
 interface Props {
@@ -21,6 +22,8 @@ interface Props {
   rows: ReportRow[];
   /** plain A4 table for printing */
   print?: boolean;
+  /** headings / subtotals inside the table (statements) */
+  rowTone?: (row: ReportRow) => RowTone | undefined;
 }
 
 const RIGHT: ReportColumn['kind'][] = ['money', 'number', 'qty'];
@@ -30,7 +33,7 @@ function negative(column: ReportColumn, row: ReportRow) {
 }
 
 /** Renders any report from the registry, with a totals row when it makes sense. */
-export function ReportTable({ columns, rows, print = false }: Props) {
+export function ReportTable({ columns, rows, print = false, rowTone }: Props) {
   const totals = columnTotals(columns, rows);
   const hasTotals = Object.keys(totals).length > 0 && rows.length > 1;
   const firstTotal = columns.findIndex((c) => c.total);
@@ -49,7 +52,10 @@ export function ReportTable({ columns, rows, print = false }: Props) {
         </thead>
         <tbody>
           {rows.map((row, index) => (
-            <tr key={index}>
+            <tr
+              key={index}
+              style={rowTone?.(row) ? { fontWeight: 700 } : undefined}
+            >
               {columns.map((column) => (
                 <td key={column.key} className={RIGHT.includes(column.kind) ? 'a4-num' : undefined}>
                   {displayCell(column, row)}
@@ -94,7 +100,13 @@ export function ReportTable({ columns, rows, print = false }: Props) {
         </TableHeader>
         <TableBody>
           {rows.map((row, index) => (
-            <TableRow key={index}>
+            <TableRow
+              key={index}
+              className={cn(
+                rowTone?.(row) === 'heading' && 'bg-muted/40 font-semibold',
+                rowTone?.(row) === 'total' && 'border-t-2 font-semibold'
+              )}
+            >
               {columns.map((column, columnIndex) => {
                 const text = displayCell(column, row);
                 const href = column.href?.(row);

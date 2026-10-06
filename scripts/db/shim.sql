@@ -45,18 +45,27 @@ create table if not exists auth.users (
 create unique index if not exists users_email_key on auth.users (lower(email))
   where email is not null;
 
+-- Same as Supabase: current PostgREST sets request.jwt.claims (JSON),
+-- older versions set one request.jwt.claim.<name> setting per claim.
 create or replace function auth.uid()
 returns uuid
 language sql stable
 as $$
-  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid;
+  select coalesce(
+    nullif(current_setting('request.jwt.claim.sub', true), ''),
+    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
+  )::uuid;
 $$;
 
 create or replace function auth.role()
 returns text
 language sql stable
 as $$
-  select coalesce(current_setting('request.jwt.claim.role', true), 'anon');
+  select coalesce(
+    nullif(current_setting('request.jwt.claim.role', true), ''),
+    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role'),
+    'anon'
+  );
 $$;
 
 create or replace function auth.jwt()

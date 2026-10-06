@@ -31,6 +31,12 @@ exception when others then
   end if;
 end $$;
 
+-- a built-in account by its key, read the way the signed-in user sees it
+create or replace function public.t_acc(p_key text)
+returns uuid language sql stable as $$
+  select id from public.accounts where system_key = p_key;
+$$;
+
 -- -------------------------------------------------------------
 --  SETUP : test users (profiles are created by the trigger)
 -- -------------------------------------------------------------
@@ -714,6 +720,287 @@ select t_assert((select rack from public.products where sku = 'TEST-003') = 'Z9'
                 'inventory staff can edit product details');
 
 -- =============================================================
+--  PHASE : ACCOUNTING (owner keeps the books)
+-- =============================================================
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+
+insert into public.customers (name, phone) values ('Test Books Customer', '9800000099');
+insert into public.products (name, sku, unit_id, purchase_price, selling_price, tax_rate)
+select 'Test Books Item', 'TEST-050', (select id from public.units where name = 'Piece'), 30, 50, 13;
+
+-- opening stock: 20 × Rs. 30 = Rs. 600 into stock, against opening balances
+select public.adjust_stock(
+  p_product_id => (select id from public.products where sku = 'TEST-050'),
+  p_new_stock => 20, p_movement_type => 'initial');
+select t_assert(
+  (select count(*) from public.journal_entries je
+     join public.journal_lines jl on jl.entry_id = je.id
+    where je.source_type = 'stock_adjustment'
+      and je.narration like 'Opening stock — Test Books Item%'
+      and ((jl.account_id = public.t_acc('inventory') and jl.debit = 600)
+        or (jl.account_id = public.t_acc('opening_equity') and jl.credit = 600))) = 2,
+  'opening stock is posted: Dr Stock 600 / Cr Opening Balances 600');
+
+-- sale: 2 × 50 = 100 + 13 VAT = 113, paid 50 cash, 63 due
+select public.create_sale(
+  p_customer_id => (select id from public.customers where name = 'Test Books Customer'),
+  p_items => jsonb_build_array(jsonb_build_object(
+    'product_id', (select id from public.products where sku = 'TEST-050'),
+    'quantity', 2, 'unit_price', 50)),
+  p_paid => 50, p_payment_method => 'cash') as r \gset
+select :'r'::jsonb->>'sale_id' as acc_sid \gset
+
+select t_assert(
+  (select jsonb_object_agg(a.system_key, jl.debit - jl.credit)
+     from public.journal_entries je
+     join public.journal_lines jl on jl.entry_id = je.id
+     join public.accounts a on a.id = jl.account_id
+    where je.source_type = 'sale' and je.source_id = :'acc_sid'::uuid)
+  = '{"cash": 50, "receivable": 63, "sales": -100, "vat_output": -13, "cogs": 60, "inventory": -60}'::jsonb,
+  'sale posts cash 50 + receivable 63 = sales 100 + VAT 13, and cost 60 out of stock');
+select t_assert(
+  (select jl.customer_id from public.journal_lines jl
+     join public.journal_entries je on je.id = jl.entry_id
+    where je.source_id = :'acc_sid'::uuid
+      and jl.account_id = public.t_acc('receivable'))
+  = (select id from public.customers where name = 'Test Books Customer'),
+  'the receivable line names the customer');
+
+-- payment by bank clears the due
+select public.record_customer_payment(
+  p_customer_id => (select id from public.customers where name = 'Test Books Customer'),
+  p_amount => 63, p_method => 'bank', p_sale_id => :'acc_sid'::uuid);
+select t_assert(
+  (select sum(jl.debit - jl.credit) from public.journal_lines jl
+    where jl.customer_id = (select id from public.customers where name = 'Test Books Customer')
+      and jl.account_id = public.t_acc('receivable')) = 0,
+  'customer ledger is clear after the bank payment');
+
+-- expense: posted to its category account, rewritten when edited, removed when deleted
+insert into public.expenses (category_id, amount, spent_on, method, description)
+select id, 400, current_date, 'wallet', 'Books test expense'
+from public.expense_categories where name = 'Internet';
+select id as acc_eid from public.expenses where description = 'Books test expense' \gset
+select entry_number as acc_enum from public.journal_entries
+ where source_type = 'expense' and source_id = :'acc_eid'::uuid \gset
+select t_assert(
+  (select count(*) from public.journal_lines jl
+     join public.journal_entries je on je.id = jl.entry_id
+    where je.source_id = :'acc_eid'::uuid
+      and ((jl.account_id = (select account_id from public.expense_categories where name = 'Internet')
+            and jl.debit = 400)
+        or (jl.account_id = public.t_acc('wallet') and jl.credit = 400))) = 2,
+  'expense posts Dr Internet 400 / Cr Digital Wallet 400');
+
+update public.expenses set amount = 450, method = 'cash' where id = :'acc_eid'::uuid;
+select t_assert(
+  (select je.entry_number = :'acc_enum' and je.total = 450
+     from public.journal_entries je
+    where je.source_type = 'expense' and je.source_id = :'acc_eid'::uuid),
+  'edited expense keeps its entry number with the new amount');
+select t_assert(
+  (select jl.credit from public.journal_lines jl
+     join public.journal_entries je on je.id = jl.entry_id
+    where je.source_id = :'acc_eid'::uuid
+      and jl.account_id = public.t_acc('cash')) = 450,
+  'edited expense now comes out of cash');
+
+delete from public.expenses where id = :'acc_eid'::uuid;
+select t_assert(
+  (select count(*) from public.journal_entries
+    where source_type = 'expense' and source_id = :'acc_eid'::uuid) = 0,
+  'deleted expense leaves the books');
+
+-- new expense categories get their own account
+insert into public.expense_categories (name) values ('Generator Fuel');
+select t_assert(
+  (select a.type = 'expense' and a.name = 'Generator Fuel'
+     from public.expense_categories ec join public.accounts a on a.id = ec.account_id
+    where ec.name = 'Generator Fuel'),
+  'a new expense category creates its own expense account');
+
+-- manual journal entry: owner puts Rs. 50,000 into the shop
+select public.create_journal_entry(
+  current_date, 'Owner invested in the shop',
+  jsonb_build_array(
+    jsonb_build_object('account_id', public.t_acc('cash'), 'debit', 50000),
+    jsonb_build_object('account_id', public.t_acc('capital'), 'credit', 50000),
+    jsonb_build_object('account_id', public.t_acc('bank'))),
+  'CAP-1') as r \gset
+select :'r'::jsonb->>'entry_id' as acc_jid \gset
+select t_assert(
+  (select count(*) from public.journal_lines where entry_id = :'acc_jid'::uuid) = 2
+  and (select total from public.journal_entries where id = :'acc_jid'::uuid) = 50000,
+  'manual entry saved with its two real lines (empty rows ignored)');
+
+select t_expect_error(
+  $q$select public.create_journal_entry(current_date, 'Unbalanced', jsonb_build_array(
+       jsonb_build_object('account_id', public.t_acc('cash'), 'debit', 100),
+       jsonb_build_object('account_id', public.t_acc('capital'), 'credit', 90))) $q$,
+  'must be equal');
+select t_expect_error(
+  $q$select public.create_journal_entry(current_date, 'One line', jsonb_build_array(
+       jsonb_build_object('account_id', public.t_acc('cash'), 'debit', 100))) $q$,
+  'at least two lines');
+select t_expect_error(
+  $q$select public.create_journal_entry(current_date, 'Both sides', jsonb_build_array(
+       jsonb_build_object('account_id', public.t_acc('cash'), 'debit', 100, 'credit', 100),
+       jsonb_build_object('account_id', public.t_acc('capital'), 'credit', 0))) $q$,
+  'not both');
+select t_expect_error(
+  $q$select public.create_journal_entry(current_date, 'Fake receivable', jsonb_build_array(
+       jsonb_build_object('account_id', public.t_acc('receivable'), 'debit', 100),
+       jsonb_build_object('account_id', public.t_acc('capital'), 'credit', 100))) $q$,
+  'kept up to date automatically');
+select t_expect_error(
+  $q$select public.create_journal_entry(current_date + 5, 'Future', jsonb_build_array(
+       jsonb_build_object('account_id', public.t_acc('cash'), 'debit', 100),
+       jsonb_build_object('account_id', public.t_acc('capital'), 'credit', 100))) $q$,
+  'future');
+select t_expect_error(
+  $q$select public.create_journal_entry(current_date, '  ', jsonb_build_array(
+       jsonb_build_object('account_id', public.t_acc('cash'), 'debit', 100),
+       jsonb_build_object('account_id', public.t_acc('capital'), 'credit', 100))) $q$,
+  'narration');
+
+-- reversal of a manual entry
+select public.reverse_journal_entry(:'acc_jid'::uuid, 'Entered twice by mistake') as r \gset
+select t_assert(
+  (select jsonb_object_agg(a.system_key, jl.debit - jl.credit)
+     from public.journal_entries je
+     join public.journal_lines jl on jl.entry_id = je.id
+     join public.accounts a on a.id = jl.account_id
+    where je.source_type = 'reversal' and je.source_id = :'acc_jid'::uuid)
+  = '{"cash": -50000, "capital": 50000}'::jsonb,
+  'reversal posts the exact opposite');
+select t_expect_error(
+  format('select public.reverse_journal_entry(%L, %L)', :'acc_jid', 'again'),
+  'already reversed');
+select t_expect_error(
+  format('select public.reverse_journal_entry(%L, %L)',
+         (select id from public.journal_entries where source_type = 'sale' limit 1), 'no'),
+  'only manual entries');
+select t_expect_error(
+  format('select public.reverse_journal_entry(%L, %L)', :'acc_jid', ''),
+  'reason');
+
+-- chart of accounts
+select public.save_account(null, '2210', 'Test Owner Loan', 'liability', 'Loan from a relative') as r \gset
+select :'r'::jsonb->>'account_id' as acc_aid \gset
+select t_expect_error(
+  $q$select public.save_account(null, '2210', 'Another', 'liability') $q$, 'already uses the code');
+select t_expect_error(
+  $q$select public.save_account(null, '2299', 'test owner loan', 'liability') $q$, 'already called');
+select t_expect_error(
+  format('select public.save_account(%L, %L, %L, %L)', public.t_acc('cash'), '1000', 'Cash in Hand', 'expense'),
+  'cannot change type');
+select t_expect_error(
+  format('select public.save_account(%L, %L, %L, %L, null, false)', public.t_acc('cash'), '1000', 'Cash in Hand', 'asset'),
+  'cannot be switched off');
+
+select public.create_journal_entry(current_date, 'Loan received', jsonb_build_array(
+  jsonb_build_object('account_id', public.t_acc('bank'), 'debit', 10000),
+  jsonb_build_object('account_id', :'acc_aid'::uuid, 'credit', 10000)));
+select t_expect_error(
+  format('select public.save_account(%L, %L, %L, %L, null, false)', :'acc_aid', '2210', 'Test Owner Loan', 'liability'),
+  'still has a balance');
+select t_expect_error(
+  format('select public.save_account(%L, %L, %L, %L)', :'acc_aid', '2210', 'Test Owner Loan', 'asset'),
+  'already has entries');
+
+select public.save_account(null, '4290', 'Test Unused Income', 'income') as r \gset
+select public.save_account((:'r'::jsonb->>'account_id')::uuid, '4290', 'Test Unused Income', 'income', null, false);
+select t_expect_error(
+  format($q$select public.create_journal_entry(current_date, 'Closed account', jsonb_build_array(
+       jsonb_build_object('account_id', %L, 'credit', 100),
+       jsonb_build_object('account_id', public.t_acc('cash'), 'debit', 100)))$q$,
+       :'r'::jsonb->>'account_id'),
+  'switched off');
+
+-- the books can only be written through the functions
+select t_expect_error(
+  $q$insert into public.journal_entries (entry_number, entry_date, narration) values ('JV-HACK', current_date, 'x') $q$,
+  'permission denied');
+select t_expect_error(
+  $q$update public.journal_lines set debit = debit + 1 $q$, 'permission denied');
+select t_expect_error(
+  $q$select public.acc_post('manual', null, current_date, now(), 'x', '[]'::jsonb) $q$,
+  'permission denied');
+select t_expect_error(
+  $q$insert into public.expense_categories (name, account_id) values ('Sneaky', public.t_acc('cash')) $q$,
+  'permission denied');
+
+-- reports agree with themselves
+select t_assert(
+  (select sum(closing_debit) = sum(closing_credit) and sum(period_debit) = sum(period_credit)
+     from public.report_trial_balance((current_date - 365)::date, current_date)),
+  'trial balance: debits equal credits');
+select t_assert(
+  (select sum(amount) filter (where type = 'asset')
+        = sum(amount) filter (where type in ('liability','equity'))
+     from public.report_balance_sheet(current_date)),
+  'balance sheet: assets = liabilities + equity');
+select t_assert(
+  (select coalesce(sum(case when type = 'income' then amount else -amount end), 0)
+     from public.report_income_statement((current_date - 30)::date, current_date))
+  = (public.accounting_overview((current_date - 30)::date, current_date) ->> 'profit')::numeric,
+  'income statement profit matches the overview');
+select t_assert(
+  (select count(*) from public.report_account_ledger(public.t_acc('capital'), current_date, current_date)) = 3
+  and (select balance from public.report_account_ledger(public.t_acc('capital'), current_date, current_date)
+        where entry_id is not null order by balance desc limit 1) = 0,
+  'capital ledger: opening row, the investment and its reversal, ending at zero');
+select t_assert(
+  (public.accounting_overview(current_date, current_date) ->> 'unbalanced_entries')::int = 0,
+  'no entry is out of balance');
+
+-- stock revaluation brings the stock account in line, once
+select public.post_stock_revaluation();
+select t_assert(
+  (select (c ->> 'app')::numeric = (c ->> 'books')::numeric
+     from jsonb_array_elements(public.accounting_overview(current_date, current_date) -> 'checks') c
+    where c ->> 'key' = 'stock'),
+  'after revaluation the stock account equals the stock value');
+select t_expect_error($q$select public.post_stock_revaluation() $q$, 'already matches');
+
+-- cashier and manager cannot see or touch the books
+select set_config('request.jwt.claim.sub', '33333333-3333-4333-8333-333333333333', false);
+select t_assert((select count(*) from public.journal_entries) = 0, 'cashier cannot read the journal');
+select t_assert((select count(*) from public.accounts) = 0, 'cashier cannot read the chart of accounts');
+select t_expect_error($q$select public.accounting_overview(current_date, current_date) $q$, 'permission');
+select t_expect_error(
+  $q$select public.create_journal_entry(current_date, 'Cashier entry', '[]'::jsonb) $q$, 'permission');
+-- …but their sales are still booked
+select public.create_sale(
+  p_items => jsonb_build_array(jsonb_build_object(
+    'product_id', (select id from public.products where sku = 'TEST-050'),
+    'quantity', 1, 'unit_price', 50)),
+  p_paid => 56.5, p_payment_method => 'wallet') as r \gset
+select :'r'::jsonb->>'sale_id' as acc_cashier_sid \gset
+
+-- current Supabase passes the token only as request.jwt.claims (JSON):
+-- role checks inside the database functions must still apply
+select set_config('request.jwt.claim.sub', '', false);
+select set_config('request.jwt.claim.role', '', false);
+select set_config('request.jwt.claims',
+  '{"sub": "33333333-3333-4333-8333-333333333333", "role": "authenticated"}', false);
+select t_expect_error(
+  $q$select public.create_journal_entry(current_date, 'Cashier entry', jsonb_build_array(
+       jsonb_build_object('account_id', public.t_acc('cash'), 'debit', 100),
+       jsonb_build_object('account_id', public.t_acc('capital'), 'credit', 100))) $q$,
+  'permission');
+select t_expect_error(
+  format('select public.cancel_sale(%L, %L)', :'acc_cashier_sid', 'Cashier cancels'),
+  'permission');
+select set_config('request.jwt.claims', '', false);
+select set_config('request.jwt.claim.role', 'authenticated', false);
+
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select t_expect_error($q$select * from public.report_trial_balance(current_date, current_date) $q$, 'permission');
+select t_expect_error(
+  $q$select public.save_account(null, '9999', 'Manager account', 'asset') $q$, 'permission');
+
+-- =============================================================
 --  PHASE : DEACTIVATED USER
 -- =============================================================
 select set_config('request.jwt.claim.sub', '44444444-4444-4444-8444-444444444444', false);
@@ -757,6 +1044,62 @@ select t_assert(
       (select coalesce(sum(sm.quantity_change), 0)
          from public.stock_movements sm where sm.product_id = p.id)) = 0,
   'stock always matches the movement history');
+
+-- the books: every entry balances and every document is booked once
+select t_assert(
+  (select count(*) from (
+     select entry_id from public.journal_lines
+     group by entry_id having sum(debit) <> sum(credit) or count(*) < 2) x) = 0,
+  'every journal entry has equal debits and credits');
+select t_assert(
+  (select count(*) from public.sales s
+    where not exists (select 1 from public.journal_entries je
+                       where je.source_type = 'sale' and je.source_id = s.id)) = 0
+  and (select count(*) from public.sales s
+    where s.status = 'cancelled'
+      and not exists (select 1 from public.journal_entries je
+                       where je.source_type = 'sale_cancel' and je.source_id = s.id)) = 0,
+  'every sale and every cancellation is in the books');
+select t_assert(
+  (select count(*) from public.purchases p
+    where not exists (select 1 from public.journal_entries je
+                       where je.source_type = 'purchase' and je.source_id = p.id)) = 0
+  and (select count(*) from public.sales_returns r
+    where not exists (select 1 from public.journal_entries je
+                       where je.source_type = 'sales_return' and je.source_id = r.id)) = 0
+  and (select count(*) from public.purchase_returns r
+    where not exists (select 1 from public.journal_entries je
+                       where je.source_type = 'purchase_return' and je.source_id = r.id)) = 0
+  and (select count(*) from public.customer_payments p
+    where not exists (select 1 from public.journal_entries je
+                       where je.source_type = 'customer_payment' and je.source_id = p.id)) = 0
+  and (select count(*) from public.supplier_payments p
+    where not exists (select 1 from public.journal_entries je
+                       where je.source_type = 'supplier_payment' and je.source_id = p.id)) = 0,
+  'every purchase, return and payment is in the books');
+select t_assert(
+  (select count(*) from public.expenses e
+    where (select je.total from public.journal_entries je
+            where je.source_type = 'expense' and je.source_id = e.id) is distinct from e.amount) = 0,
+  'every expense is in the books with its current amount');
+select t_assert(
+  (select je.total from public.journal_entries je
+    where je.source_type = 'sale' and je.source_id = :'acc_cashier_sid'::uuid) = 56.5 + 30,
+  'a cashier sale is booked even though the cashier cannot see the books');
+
+-- control accounts agree with the customer and supplier screens
+select t_assert(
+  (select count(*) from public.customers c
+    where c.balance_due <> coalesce((select sum(jl.debit - jl.credit) from public.journal_lines jl
+                                      where jl.customer_id = c.id
+                                        and jl.account_id = public.t_acc('receivable')), 0)) = 0,
+  'each customer balance equals their receivable ledger');
+select t_assert(
+  (select count(*) from public.suppliers s
+    where s.balance_payable <> coalesce((select sum(jl.credit - jl.debit) from public.journal_lines jl
+                                          where jl.supplier_id = s.id
+                                            and jl.account_id = public.t_acc('payable')), 0)) = 0,
+  'each supplier balance equals their payable ledger');
 
 -- hard constraints still hold even for a superuser
 select t_expect_error(
@@ -811,5 +1154,6 @@ select t_assert(
 
 drop function public.t_assert(boolean, text);
 drop function public.t_expect_error(text, text);
+drop function public.t_acc(text);
 
 select 'ALL TESTS PASSED' as result;

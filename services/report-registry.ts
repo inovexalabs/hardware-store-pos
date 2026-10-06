@@ -20,6 +20,10 @@ import {
   getStockValuation,
   getSupplierPayables,
 } from '@/services/reports';
+import { getBalanceSheet, getIncomeStatement, getTrialBalance } from '@/services/accounting';
+import { ACCOUNT_TYPE_SINGULAR, ledgerHref } from '@/lib/accounting';
+import { hasPermission, type Permission } from '@/lib/permissions';
+import type { AccountAmountRow, AccountType, UserRole } from '@/types/database';
 import {
   formatDate,
   formatDateTime,
@@ -29,13 +33,14 @@ import {
   paymentMethodLabel,
 } from '@/utils/format';
 
-export type ReportGroup = 'sales' | 'purchases' | 'inventory' | 'financial';
+export type ReportGroup = 'sales' | 'purchases' | 'inventory' | 'financial' | 'accounting';
 
 export const REPORT_GROUPS: { value: ReportGroup; label: string }[] = [
   { value: 'sales', label: 'Sales & Profit' },
   { value: 'purchases', label: 'Purchases' },
   { value: 'inventory', label: 'Stock' },
   { value: 'financial', label: 'Money Owed & Expenses' },
+  { value: 'accounting', label: 'Accounting' },
 ];
 
 export type ColumnKind = 'text' | 'money' | 'number' | 'qty' | 'date' | 'datetime';
@@ -56,6 +61,8 @@ export interface ReportColumn {
   href?: (row: ReportRow) => string | null;
 }
 
+export type RowTone = 'heading' | 'total';
+
 export interface ReportArgs {
   from: string;
   to: string;
@@ -71,6 +78,12 @@ export interface ReportDefinition {
   usesRange: boolean;
   /** slow-moving stock: "not sold in N days" */
   usesDays?: boolean;
+  /** one "as of" date (the range's end), e.g. the balance sheet */
+  asOf?: boolean;
+  /** who may open it (default: reports.view) */
+  permission?: Permission;
+  /** headings and subtotals inside the table are shown in bold */
+  rowTone?: (row: ReportRow) => RowTone | undefined;
   columns: ReportColumn[];
   load: (args: ReportArgs) => Promise<ReportRow[]>;
   emptyMessage: string;
@@ -89,6 +102,56 @@ const MOVEMENT_LABELS: Record<string, string> = {
 
 const productLink = (row: ReportRow) => (row.product_id ? `/products/${row.product_id}` : null);
 const asRows = <T,>(rows: T[] | null | undefined) => (rows ?? []) as unknown as ReportRow[];
+
+// ---------- accounting statements: headings, account lines, subtotals ----------
+const toneOf = (row: ReportRow) => row._tone as RowTone | undefined;
+const linkOf = (row: ReportRow) => (row._href as string | null | undefined) ?? null;
+const roundRs = (n: number) => Math.round(n * 100) / 100;
+const moneyOrBlank = (key: string) => (row: ReportRow) =>
+  Number(row[key]) ? formatRs(Number(row[key])) : '';
+
+const headingRow = (name: string): ReportRow => ({ code: '', name, amount: null, _tone: 'heading' });
+const totalRow = (name: string, amount: number): ReportRow => ({
+  code: '',
+  name,
+  amount: roundRs(amount),
+  _tone: 'total',
+});
+
+function accountSection(
+  title: string,
+  totalLabel: string,
+  rows: AccountAmountRow[],
+  link: (accountId: string) => string
+): { rows: ReportRow[]; total: number } {
+  const total = rows.reduce((sum, row) => sum + Number(row.amount), 0);
+  return {
+    total,
+    rows: [
+      headingRow(title),
+      ...rows.map((row) => ({
+        code: row.code,
+        name: row.name,
+        amount: Number(row.amount),
+        _href: row.account_id ? link(row.account_id) : null,
+      })),
+      totalRow(totalLabel, total),
+    ],
+  };
+}
+
+const ofType = (rows: AccountAmountRow[], type: AccountType) => rows.filter((row) => row.type === type);
+
+const STATEMENT_COLUMNS: ReportColumn[] = [
+  { key: 'code', label: 'Code', kind: 'text', display: (row) => String(row.code ?? '') },
+  { key: 'name', label: 'Account', kind: 'text', href: linkOf },
+  {
+    key: 'amount',
+    label: 'Amount',
+    kind: 'money',
+    display: (row) => (toneOf(row) === 'heading' ? '' : formatRs(Number(row.amount))),
+  },
+];
 
 export const REPORTS: ReportDefinition[] = [
   // ------------------------------ SALES ------------------------------
@@ -392,7 +455,101 @@ export const REPORTS: ReportDefinition[] = [
     load: async () => asRows(await getSupplierPayables()),
     emptyMessage: 'You owe no supplier anything.',
   },
+
+  // ---------------------------- ACCOUNTING ----------------------------
+  {
+    kind: 'trial-balance',
+    title: 'Trial Balance',
+    description: 'Every account with what moved in the period and its closing balance. Both pairs of totals must be equal.',
+    group: 'accounting',
+    usesRange: true,
+    permission: 'accounting.view',
+    columns: [
+      { key: 'code', label: 'Code', kind: 'text' },
+      { key: 'name', label: 'Account', kind: 'text', href: linkOf },
+      {
+        key: 'type',
+        label: 'Type',
+        kind: 'text',
+        display: (row) => ACCOUNT_TYPE_SINGULAR[row.type as AccountType] ?? String(row.type),
+      },
+      { key: 'period_debit', label: 'Debits in period', kind: 'money', total: true, display: moneyOrBlank('period_debit') },
+      { key: 'period_credit', label: 'Credits in period', kind: 'money', total: true, display: moneyOrBlank('period_credit') },
+      { key: 'closing_debit', label: 'Balance (Dr)', kind: 'money', total: true, display: moneyOrBlank('closing_debit') },
+      { key: 'closing_credit', label: 'Balance (Cr)', kind: 'money', total: true, display: moneyOrBlank('closing_credit') },
+    ],
+    load: async ({ from, to }) =>
+      (await getTrialBalance(from, to)).map((row) => ({
+        ...row,
+        _href: ledgerHref(row.account_id, from, to),
+      })),
+    emptyMessage: 'Nothing has been posted to the books up to this date.',
+  },
+  {
+    kind: 'income-statement',
+    title: 'Income Statement',
+    description: 'Profit and loss from the accounting books — includes manual entries and stock written off.',
+    group: 'accounting',
+    usesRange: true,
+    permission: 'accounting.view',
+    columns: STATEMENT_COLUMNS,
+    rowTone: toneOf,
+    load: async ({ from, to }) => {
+      const rows = await getIncomeStatement(from, to);
+      if (rows.length === 0) return [];
+      const link = (id: string) => ledgerHref(id, from, to);
+      const income = accountSection('Income', 'Total income', ofType(rows, 'income'), link);
+      const expenses = accountSection('Expenses', 'Total expenses', ofType(rows, 'expense'), link);
+      const profit = income.total - expenses.total;
+      return [
+        ...income.rows,
+        ...expenses.rows,
+        totalRow(profit >= 0 ? 'Net profit' : 'Net loss', profit),
+      ];
+    },
+    emptyMessage: 'No income or expenses in this period.',
+  },
+  {
+    kind: 'balance-sheet',
+    title: 'Balance Sheet',
+    description: 'What the shop owns, what it owes, and the owner’s share, on one date.',
+    group: 'accounting',
+    usesRange: true,
+    asOf: true,
+    permission: 'accounting.view',
+    columns: STATEMENT_COLUMNS,
+    rowTone: toneOf,
+    load: async ({ from, to }) => {
+      const rows = await getBalanceSheet(to);
+      if (rows.every((row) => Number(row.amount) === 0)) return [];
+      const link = (id: string) => ledgerHref(id, from, to);
+      const assets = accountSection('Assets', 'Total assets', ofType(rows, 'asset'), link);
+      const liabilities = accountSection('Liabilities', 'Total liabilities', ofType(rows, 'liability'), link);
+      const equity = accountSection(
+        'Owner’s equity',
+        'Total owner’s equity',
+        ofType(rows, 'equity').filter((row) => row.account_id || Number(row.amount) !== 0),
+        link
+      );
+      return [
+        ...assets.rows,
+        ...liabilities.rows,
+        ...equity.rows,
+        totalRow('Total liabilities + owner’s equity', liabilities.total + equity.total),
+      ];
+    },
+    emptyMessage: 'Nothing has been posted to the books up to this date.',
+  },
 ];
+
+/** The permission needed to open, print or download a report. */
+export function reportPermission(report: ReportDefinition): Permission {
+  return report.permission ?? 'reports.view';
+}
+
+export function canOpenReport(role: UserRole | null | undefined, report: ReportDefinition): boolean {
+  return hasPermission(role, reportPermission(report));
+}
 
 export function getReportDefinition(kind: string): ReportDefinition | undefined {
   return REPORTS.find((report) => report.kind === kind);
