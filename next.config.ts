@@ -7,6 +7,11 @@ const nextConfig: NextConfig = {
       // server actions; the default limit is 1 MB
       bodySizeLimit: '5mb',
     },
+    // keep pages the user just visited in the browser for 30 s, so going
+    // back is instant; saving anything refreshes them straight away
+    staleTimes: {
+      dynamic: 30,
+    },
   },
 };
 

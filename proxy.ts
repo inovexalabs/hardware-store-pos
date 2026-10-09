@@ -31,11 +31,12 @@ export async function proxy(request: NextRequest) {
     }
   );
 
-  // IMPORTANT: do not run code between client creation and getUser —
-  // it refreshes tokens and writes cookies.
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // IMPORTANT: do not run code between client creation and getClaims —
+  // it refreshes tokens and writes cookies.  getClaims checks the token's
+  // signature locally with the project's (cached) signing keys instead of
+  // calling Supabase Auth on every request.
+  const { data } = await supabase.auth.getClaims();
+  const user = data?.claims ?? null;
 
   const { pathname } = request.nextUrl;
   const isLoginPage = pathname === '/login';
